@@ -8,12 +8,38 @@ import { App } from "@microsoft/teams.apps";
 import { LocalStorage } from "@microsoft/teams.common";
 import config from "./config";
 import { ManagedIdentityCredential } from "@azure/identity";
+import * as fs from "fs";
+import * as path from "path";
 
 // Create storage for conversation history
 const storage = new LocalStorage();
 
+// File-based storage for conversation references
+const CONVERSATIONS_FILE = path.join(__dirname, "conversations.json");
+
+function loadConversationReferences(): Map<string, ConversationReference> {
+  try {
+    if (fs.existsSync(CONVERSATIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, "utf-8"));
+      return new Map(Object.entries(data));
+    }
+  } catch (err) {
+    console.error("Failed to load conversations.json:", err);
+  }
+  return new Map();
+}
+
+function saveConversationReferences(refs: Map<string, ConversationReference>): void {
+  try {
+    const data = Object.fromEntries(refs);
+    fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to save conversations.json:", err);
+  }
+}
+
 // Store conversation references for proactive messaging
-const conversationReferences = new Map<string, ConversationReference>();
+const conversationReferences = loadConversationReferences();
 
 const createTokenFactory = () => {
   return async (scope: string | string[], tenantId?: string): Promise<string> => {
@@ -47,8 +73,16 @@ const app = new App({
 // Capture conversation reference on bot install
 app.on("install.add" as any, async (context: any) => {
   conversationReferences.set(context.activity.conversation.id, context.ref);
-  console.log(`[message] conversationId on install: ${context.activity.conversation.id}`);
-  console.log(`[message] ref:`, JSON.stringify(context.ref, null, 2));
+  saveConversationReferences(conversationReferences);
+  console.log(`[install] conversationId: ${context.activity.conversation.id}`);
+});
+
+// Remove conversation reference on bot uninstall
+app.on("install.remove" as any, async (context: any) => {
+  const conversationId = context.activity.conversation.id;
+  conversationReferences.delete(conversationId);
+  saveConversationReferences(conversationReferences);
+  console.log(`[uninstall] removed conversationId: ${conversationId}`);
 });
 
 // Interface for conversation state
@@ -70,8 +104,8 @@ app.on("message", async (context) => {
 
   // Store/update conversation reference on every message
   console.log(`[message] conversationId: ${activity.conversation.id}`);
-  console.log(`[message] ref:`, JSON.stringify(context.ref, null, 2));
   conversationReferences.set(activity.conversation.id, context.ref);
+  saveConversationReferences(conversationReferences);
 
   const text: string = stripMentionsText(activity);
 
@@ -147,11 +181,12 @@ app.http.post("/api/notify", async (req: any, res: any) => {
     // Build mention entities if provided
     if (mentions && Array.isArray(mentions) && mentions.length > 0) {
       activityParams.entities = mentions.map((m: { id: string; name: string }) => ({
-        type: "mention",
+        type: "mention" as const,
         text: `<at>${m.name}</at>`,
         mentioned: {
           id: m.id,
           name: m.name,
+          role: "user" as const,
         },
       }));
     }
